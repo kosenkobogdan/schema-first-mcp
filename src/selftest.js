@@ -162,6 +162,31 @@ try {
     assert.ok(tool.inputSchema, `${tool.name} missing inputSchema`);
   }
 
+  const discovered = await mcpCall(origin, token.access_token, {
+    jsonrpc: '2.0',
+    id: 8,
+    method: 'server/discover',
+    params: { _meta: modernMeta },
+  });
+  assert.equal(typeof discovered.parsed.result.instructions, 'string');
+  assert.ok(discovered.parsed.result.instructions.length > 0, 'server/discover instructions are empty');
+
+  const missingAudio = 'https://hq.mega.dev/media/s02e03/missing.mp3';
+  const missing = await mcpCall(origin, token.access_token, {
+    jsonrpc: '2.0',
+    id: 9,
+    method: 'tools/call',
+    params: {
+      name: 'transcribe',
+      arguments: { url: missingAudio },
+      _meta: modernMeta,
+    },
+  });
+  assert.equal(missing.parsed.result.isError, true);
+  const missingText = missing.parsed.result.content.map(part => part.text).join('\n');
+  assert.match(missingText, /audio download failed \(404\)/);
+  assert.match(missingText, /https:\/\/hq\.mega\.dev\/media\/s02e03\/missing\.mp3/);
+
   const written = await mcpCall(origin, token.access_token, {
     jsonrpc: '2.0',
     id: 3,

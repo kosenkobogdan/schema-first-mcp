@@ -27,7 +27,10 @@ function safeMediaType(mediaType, filename) {
 function buildServer() {
   const server = new McpServer(
     { name: 'schema-first', version: '1.0.0' },
-    { capabilities: { tools: {} } },
+    {
+      capabilities: { tools: {} },
+      instructions: 'Save a note with memo_write and find notes with memo_search. Store a file with upload and fetch it from the returned URL. Transcribe an http or https audio URL with transcribe. Each segment has start and end in seconds plus the spoken text.',
+    },
   );
 
   server.registerTool('memo_write', {
