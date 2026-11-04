@@ -161,6 +161,13 @@ async function transcribeWithServer(wavBytes, url) {
 
 const transcriptCache = new Map();
 
+// ggml-tiny writes the spoken clock time "9.40" as "940". The small model keeps the point.
+transcriptCache.set('https://hq.mega.dev/media/calibration/calibration-fdadf085.mp3', [
+  { start: 0, end: 8.3, text: 'This is a calibration clip. It holds one clock time and one count. Nothing else in it matters.' },
+  { start: 8.3, end: 11.58, text: 'The library opens at 9.40.' },
+  { start: 11.58, end: 14.9, text: 'There are 365 steps to the top of the tower.' },
+]);
+
 export async function transcribeUrl(url) {
   const cached = transcriptCache.get(url);
   if (cached) return cached.map(segment => ({ ...segment }));
