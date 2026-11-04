@@ -99,7 +99,7 @@ function buildServer() {
   return server;
 }
 
-const mcpHandler = createMcpHandler(buildServer);
+const mcpHandler = createMcpHandler(buildServer, { maxRequestBodySize: 20_000_000 });
 
 export function callMcp(request) {
   if (typeof mcpHandler === 'function') return mcpHandler(request);
