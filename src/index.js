@@ -18,6 +18,7 @@ import {
 } from './oauth.js';
 import { planPage } from './pages.js';
 import { filePath, getFile, loadStore } from './store.js';
+import { warmTranscription } from './transcribe.js';
 
 const MAX_BODY = 20_000_000;
 
@@ -225,6 +226,7 @@ async function handle(req, res) {
 
 export async function startServer(port = 8787, host = '0.0.0.0') {
   await loadStore();
+  await warmTranscription();
   const server = createServer((req, res) => {
     handle(req, res).catch(error => {
       const status = error.status || 500;

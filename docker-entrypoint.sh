@@ -10,6 +10,7 @@ whisper-server \
   -bo 1 \
   -nf \
   -nlp \
+  -fa \
   --host 127.0.0.1 \
   --port 8091 \
   --public /tmp/whisper-public \

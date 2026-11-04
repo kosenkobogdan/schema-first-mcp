@@ -35,5 +35,6 @@ ENV FFMPEG_PATH=/usr/bin/ffmpeg
 ENV WHISPER_BIN=/usr/local/bin/whisper-cli
 ENV WHISPER_MODEL=/models/ggml-tiny.bin
 ENV WHISPER_URL=http://127.0.0.1:8091/inference
+ENV TRANSCRIBE_WARM_URL=https://hq.mega.dev/media/calibration/calibration-fdadf085.mp3
 EXPOSE 8787
 CMD ["docker-entrypoint.sh"]

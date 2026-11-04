@@ -159,9 +159,23 @@ async function transcribeWithServer(wavBytes, url) {
   return segmentsFromServer(await response.json());
 }
 
+const transcriptCache = new Map();
+
 export async function transcribeUrl(url) {
+  const cached = transcriptCache.get(url);
+  if (cached) return cached.map(segment => ({ ...segment }));
   const audio = await downloadAudio(url);
-  return enqueue(() => decodeAudio(url, audio));
+  const segments = await enqueue(() => decodeAudio(url, audio));
+  transcriptCache.set(url, segments);
+  return segments.map(segment => ({ ...segment }));
+}
+
+export async function warmTranscription() {
+  const url = process.env.TRANSCRIBE_WARM_URL;
+  if (!url || !process.env.WHISPER_URL) return;
+  const started = Date.now();
+  const segments = await transcribeUrl(url);
+  console.log(`warmed transcription in ${Date.now() - started}ms (${segments.length} segments)`);
 }
 
 async function decodeAudio(url, audio) {
