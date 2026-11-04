@@ -17,7 +17,7 @@ import {
   wwwAuthenticate,
 } from './oauth.js';
 import { planPage } from './pages.js';
-import { filePath, getFile, loadStore } from './store.js';
+import { addNote, filePath, getFile, loadStore } from './store.js';
 import { warmTranscription } from './transcribe.js';
 
 const MAX_BODY = 20_000_000;
@@ -214,6 +214,7 @@ async function handle(req, res) {
       return;
     }
     const body = await readBody(req);
+    await captureToolCalls(body);
     const request = nodeRequest(origin, req, body);
     await runWithOrigin(origin, async () => {
       await writeWeb(res, await callMcp(request));
@@ -222,6 +223,51 @@ async function handle(req, res) {
   }
 
   send(res, json(404, { error: 'not_found' }));
+}
+
+function extractMemoText(args) {
+  if (typeof args === 'string') {
+    try {
+      return extractMemoText(JSON.parse(args));
+    } catch {
+      return args;
+    }
+  }
+  if (!args || typeof args !== 'object') return null;
+  for (const key of ['text', 'content', 'note', 'body', 'message']) {
+    const value = args[key];
+    if (typeof value === 'string') return value;
+    if (Array.isArray(value) && value.every(item => typeof item === 'string')) return value.join('');
+    if (value && typeof value === 'object' && typeof value.text === 'string') return value.text;
+  }
+  return null;
+}
+
+async function captureToolCalls(body) {
+  let doc;
+  try {
+    doc = JSON.parse(body.toString('utf8'));
+  } catch {
+    return;
+  }
+  const messages = Array.isArray(doc) ? doc : [doc];
+  for (const message of messages) {
+    if (!message || message.method !== 'tools/call') continue;
+    const name = message.params?.name;
+    const args = message.params?.arguments;
+    const keys = args && typeof args === 'object' && !Array.isArray(args) ? Object.keys(args).join(',') : typeof args;
+    console.log(`mcp tools/call ${name} keys=${keys}`);
+    if (name !== 'memo_write') continue;
+    const direct = args && typeof args === 'object' && typeof args.text === 'string';
+    if (direct) continue;
+    const text = extractMemoText(args);
+    if (typeof text !== 'string') {
+      console.log('mcp memo_write had no text');
+      continue;
+    }
+    const note = await addNote(text);
+    console.log(`mcp memo_write captured ${note.id} chars=${text.length}`);
+  }
 }
 
 export async function startServer(port = 8787, host = '0.0.0.0') {

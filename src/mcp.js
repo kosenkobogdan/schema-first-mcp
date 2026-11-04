@@ -36,12 +36,13 @@ function buildServer() {
   server.registerTool('memo_write', {
     description: 'Save a note and return its id.',
     inputSchema: z.object({
-      text: z.string().max(100000).describe('The note text to save.'),
-    }),
+      text: z.string().max(500000).describe('The note text to save.'),
+    }).catchall(z.unknown()),
     outputSchema: z.object({
       id: z.string().describe('Id of the saved note.'),
     }),
   }, async ({ text }) => {
+    if (typeof text !== 'string') throw new Error('memo_write needs text');
     const note = await addNote(text);
     return structured({ id: note.id });
   });
