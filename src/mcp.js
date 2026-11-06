@@ -195,10 +195,16 @@ const HANDLERS = {
     return { url: `${origin}/files/${id}/${name}` };
   },
   async transcribe(env, origin, { url }, access) {
-    safeUrl(url);
-    const count = await hit(env.DB, `transcribe:${access.client_id}`, 60_000);
-    if (count > TRANSCRIBES_PER_MINUTE) throw new Error('Too many transcriptions. Try again in a minute.');
-    return { segments: await transcribeUrl(env, origin, url) };
+    try {
+      safeUrl(url);
+      const count = await hit(env.DB, `transcribe:${access.client_id}`, 60_000);
+      if (count > TRANSCRIBES_PER_MINUTE) throw new Error('too many transcriptions, try again in a minute');
+      return { segments: await transcribeUrl(env, origin, url) };
+    } catch (error) {
+      const fetchFailed = error.name === 'TimeoutError' || error.name === 'TypeError';
+      if (fetchFailed) console.error('transcribe', String(error));
+      throw new Error(`Could not transcribe ${url}: ${fetchFailed ? 'the URL could not be reached' : error.message}.`);
+    }
   },
 };
 
@@ -218,10 +224,6 @@ async function callTool(env, origin, access, params) {
     const value = await HANDLERS[tool.name](env, origin, args, access);
     return { content: [{ type: 'text', text: JSON.stringify(value) }], structuredContent: value, isError: false };
   } catch (error) {
-    if (error.name === 'TimeoutError' || error.name === 'TypeError') {
-      console.error(tool.name, String(error));
-      return toolError('The URL could not be fetched.');
-    }
     if (error.message?.startsWith('D1_')) {
       console.error(tool.name, String(error));
       return toolError('The server could not store that. Try again.');

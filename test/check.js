@@ -385,7 +385,19 @@ await step('transcribe refuses internal addresses', async () => {
     const result = await tool(token, 'transcribe', { url });
     assert.equal(result.isError, true, url);
     assert.match(result.content[0].text, /not allowed|must/, url);
+    assert.ok(result.content[0].text.includes(url), `the error does not name ${url}`);
   }
+});
+
+await step('transcribe errors name the URL and what is wrong with it', async () => {
+  const url = 'https://hq.mega.dev/media/s02e03/missing.mp3';
+  const result = await tool(token, 'transcribe', { url });
+  assert.equal(result.isError, true);
+  assert.ok(result.content[0].text.includes(url), result.content[0].text);
+  assert.match(result.content[0].text, /404/);
+  const unreachable = await tool(token, 'transcribe', { url: 'https://no-such-host.invalid/a.mp3' });
+  assert.equal(unreachable.isError, true);
+  assert.ok(unreachable.content[0].text.includes('no-such-host.invalid'), unreachable.content[0].text);
 });
 
 if (AUDIO_URL) {
