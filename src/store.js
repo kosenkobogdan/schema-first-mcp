@@ -1,196 +1,84 @@
-import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { Buffer } from 'node:buffer';
 
-const dir = process.env.DATA_DIR
-  ? path.resolve(process.env.DATA_DIR)
-  : path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../data');
-
-const dbPath = path.join(dir, 'db.json');
-
-function empty() {
-  return { notes: [], clients: {}, codes: {}, tokens: {}, pending: {}, files: {} };
-}
-
-let db = empty();
-let chain = Promise.resolve();
-
-export function tokenHash(value) {
-  return createHash('sha256').update(value).digest('hex');
-}
+// A D1 row holds at most 2,000,000 bytes, so files are kept as base64 pieces under that.
+const CHUNK_CHARS = 1_800_000;
+const MAX_STORED_BYTES = 300_000_000;
+const MAX_NOTES = 20_000;
 
 export function randomId(prefix = '') {
-  return prefix + randomBytes(16).toString('base64url');
+  const bytes = crypto.getRandomValues(new Uint8Array(24));
+  return prefix + Buffer.from(bytes).toString('base64url');
 }
 
-export function secretMatches(presented, storedHash) {
-  if (!presented || !storedHash) return false;
-  const a = Buffer.from(tokenHash(presented));
-  const b = Buffer.from(storedHash);
-  if (a.length !== b.length) return false;
-  return timingSafeEqual(a, b);
+export async function sha256(value) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  return Buffer.from(digest).toString('hex');
 }
 
-function prune(state, now = Date.now()) {
-  for (const [key, row] of Object.entries(state.codes)) {
-    if (row.expiresAt <= now) delete state.codes[key];
-  }
-  for (const [key, row] of Object.entries(state.pending)) {
-    if (row.expiresAt <= now) delete state.pending[key];
-  }
-  for (const [key, row] of Object.entries(state.tokens)) {
-    if (row.expiresAt <= now) delete state.tokens[key];
-  }
+export async function addNote(db, text) {
+  const { n } = await db.prepare('SELECT count(*) AS n FROM notes').first();
+  if (n >= MAX_NOTES) throw new Error('the note store is full');
+  const id = randomId('n_');
+  await db.prepare('INSERT INTO notes (id, text, search, created_at) VALUES (?, ?, ?, ?)')
+    .bind(id, text, text.toLowerCase(), new Date().toISOString())
+    .run();
+  return id;
 }
 
-async function persist() {
-  await mkdir(dir, { recursive: true });
-  const tmp = `${dbPath}.${process.pid}.tmp`;
-  await writeFile(tmp, JSON.stringify(db));
-  await rename(tmp, dbPath);
+export async function searchNotes(db, query) {
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean).slice(0, 8);
+  const clauses = words.map(() => "search LIKE ? ESCAPE '\\'");
+  const params = words.map(word => `%${word.replace(/[\\%_]/g, '\\$&')}%`);
+  const where = clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+  const { results } = await db.prepare(`SELECT id, text, created_at FROM notes ${where} ORDER BY seq DESC LIMIT 100`)
+    .bind(...params)
+    .all();
+  return results.map(row => ({ id: row.id, text: row.text, createdAt: row.created_at }));
 }
 
-function update(mutator) {
-  const run = chain.then(async () => {
-    prune(db);
-    const result = await mutator(db);
-    await persist();
-    return result;
-  });
-  chain = run.then(() => {}, () => {});
-  return run;
-}
-
-export async function loadStore() {
-  await mkdir(dir, { recursive: true });
-  try {
-    db = { ...empty(), ...JSON.parse(await readFile(dbPath, 'utf8')) };
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
-    db = empty();
-    await persist();
-  }
-  prune(db);
-  return db;
-}
-
-export function readState() {
-  return db;
-}
-
-export async function addNote(text) {
-  const note = {
-    id: randomId('n_'),
-    text,
-    createdAt: new Date().toISOString(),
-  };
-  await update(state => {
-    state.notes.unshift(note);
-  });
-  return note;
-}
-
-export function searchNotes(query) {
-  const needle = query.toLowerCase();
-  return db.notes
-    .filter(note => note.text.toLowerCase().includes(needle))
-    .slice(0, 100)
-    .map(note => ({ id: note.id, text: note.text, createdAt: note.createdAt }));
-}
-
-export async function saveClient(client) {
-  await update(state => {
-    state.clients[client.clientId] = client;
-  });
-}
-
-export function getClient(clientId) {
-  return db.clients[clientId] ?? null;
-}
-
-export async function savePending(row) {
-  await update(state => {
-    state.pending[row.id] = row;
-  });
-}
-
-export function getPending(id) {
-  const row = db.pending[id];
-  if (!row || row.expiresAt <= Date.now()) return null;
-  return row;
-}
-
-export async function deletePending(id) {
-  await update(state => {
-    delete state.pending[id];
-  });
-}
-
-export async function saveCode(rawCode, row) {
-  await update(state => {
-    state.codes[tokenHash(rawCode)] = row;
-  });
-}
-
-export async function takeCode(rawCode) {
-  const key = tokenHash(rawCode);
-  let row = null;
-  await update(state => {
-    row = state.codes[key] ?? null;
-    delete state.codes[key];
-  });
-  if (!row || row.expiresAt <= Date.now()) return null;
-  return row;
-}
-
-export async function saveToken(rawToken, row) {
-  await update(state => {
-    state.tokens[tokenHash(rawToken)] = row;
-  });
-}
-
-export function getToken(rawToken) {
-  const row = db.tokens[tokenHash(rawToken)];
-  if (!row || row.expiresAt <= Date.now()) return null;
-  return row;
-}
-
-export async function deleteToken(rawToken) {
-  const key = tokenHash(rawToken);
-  await update(state => {
-    delete state.tokens[key];
-  });
-}
-
-export async function saveFile({ filename, mediaType, bytes }) {
+export async function saveFile(db, { filename, mediaType, base64, bytes }) {
+  const { total } = await db.prepare('SELECT coalesce(sum(bytes), 0) AS total FROM files').first();
+  if (total + bytes > MAX_STORED_BYTES) throw new Error('the file store is full');
   const id = randomId('f_');
-  const safe = filename.replace(/[^A-Za-z0-9._-]/g, '_').replace(/^\.+/, '').slice(0, 80) || 'file';
-  const rel = path.join('uploads', id, safe);
-  const full = path.join(dir, rel);
-  await mkdir(path.dirname(full), { recursive: true });
-  await writeFile(full, bytes);
-  const row = {
-    id,
-    filename: safe,
-    mediaType,
-    rel,
-    bytes: bytes.length,
-    createdAt: new Date().toISOString(),
-  };
-  await update(state => {
-    state.files[id] = row;
-  });
-  return row;
+  const chunks = Math.ceil(base64.length / CHUNK_CHARS);
+  for (let n = 0; n < chunks; n += 1) {
+    await db.prepare('INSERT INTO file_chunks (file_id, n, data) VALUES (?, ?, ?)')
+      .bind(id, n, base64.slice(n * CHUNK_CHARS, (n + 1) * CHUNK_CHARS))
+      .run();
+  }
+  await db.prepare('INSERT INTO files (id, filename, media_type, bytes, chunks, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .bind(id, filename, mediaType, bytes, chunks, new Date().toISOString())
+    .run();
+  return id;
 }
 
-export function getFile(id) {
-  return db.files[id] ?? null;
+export function getFile(db, id) {
+  return db.prepare('SELECT * FROM files WHERE id = ?').bind(id).first();
 }
 
-export function filePath(row) {
-  const full = path.resolve(dir, row.rel);
-  const root = path.resolve(dir, 'uploads');
-  if (!full.startsWith(root + path.sep)) return null;
-  return full;
+export async function fileChunk(db, id, n) {
+  const row = await db.prepare('SELECT data FROM file_chunks WHERE file_id = ? AND n = ?').bind(id, n).first();
+  return Buffer.from(row.data, 'base64');
+}
+
+export async function fileBytes(db, file) {
+  const parts = [];
+  for (let n = 0; n < file.chunks; n += 1) parts.push(await fileChunk(db, file.id, n));
+  return Buffer.concat(parts);
+}
+
+export async function hit(db, key, windowMs) {
+  const bucket = Math.floor(Date.now() / windowMs);
+  const row = await db.prepare(`INSERT INTO rate (key, count, expires_at) VALUES (?, 1, ?)
+    ON CONFLICT (key) DO UPDATE SET count = count + 1 RETURNING count`)
+    .bind(`${key}:${bucket}`, (bucket + 2) * windowMs)
+    .first();
+  return row.count;
+}
+
+export async function prune(db) {
+  const now = Date.now();
+  await db.batch(['pending', 'codes', 'tokens', 'rate'].map(table => (
+    db.prepare(`DELETE FROM ${table} WHERE expires_at <= ?`).bind(now)
+  )));
 }

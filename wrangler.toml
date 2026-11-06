@@ -1,0 +1,21 @@
+name = "schema-first-mcp"
+main = "src/index.js"
+compatibility_date = "2026-10-01"
+compatibility_flags = ["nodejs_compat", "global_fetch_strictly_public"]
+workers_dev = true
+preview_urls = false
+
+[ai]
+binding = "AI"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "schema-first"
+database_id = "cada5afa-2ff0-47d8-b17a-a572a7bd7ede"
+migrations_dir = "migrations"
+
+[triggers]
+crons = ["17 3 * * *"]
+
+[observability]
+enabled = true

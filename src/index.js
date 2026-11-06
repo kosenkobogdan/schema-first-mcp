@@ -1,258 +1,155 @@
-import { createServer } from 'node:http';
-import { readFile } from 'node:fs/promises';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-
-import { callMcp } from './mcp.js';
-import { configuredOrigin, runWithOrigin } from './origin.js';
+import { handleMcp } from './mcp.js';
 import {
-  authenticateAccessToken,
+  authenticate,
+  authorizationServerDocument,
   handleAuthorize,
   handleDecision,
   handleRegister,
   handleToken,
-  metadataDocument,
   protectedResourceDocument,
   readBearer,
   wwwAuthenticate,
 } from './oauth.js';
 import { planPage } from './pages.js';
-import { filePath, getFile, loadStore } from './store.js';
+import { fileChunk, getFile, prune } from './store.js';
 
 const MAX_BODY = 20_000_000;
+const OPEN_CORS = {
+  'access-control-allow-origin': '*',
+  'access-control-allow-methods': 'GET, POST, OPTIONS',
+  'access-control-allow-headers': 'Authorization, Content-Type, Accept, MCP-Protocol-Version',
+  'access-control-max-age': '86400',
+};
+const OPEN_PATHS = ['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp', '/.well-known/oauth-authorization-server', '/token', '/register'];
 
-function applyCors(headers) {
-  headers['access-control-allow-origin'] = '*';
-  headers['access-control-allow-methods'] = 'GET, POST, DELETE, OPTIONS';
-  headers['access-control-allow-headers'] = 'Authorization, Content-Type, Accept, MCP-Protocol-Version, Mcp-Session-Id, Last-Event-ID';
-  headers['access-control-expose-headers'] = 'WWW-Authenticate, MCP-Protocol-Version, Mcp-Session-Id';
-  headers['access-control-max-age'] = '86400';
-  return headers;
-}
-
-function send(res, result) {
-  const headers = applyCors({ ...(result.headers || {}) });
-  res.writeHead(result.status, headers);
-  res.end(result.body ?? '');
-}
-
-function json(status, value, extra = {}) {
-  return {
+function json(status, value, headers = {}) {
+  return new Response(JSON.stringify(value), {
     status,
-    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...extra },
-    body: JSON.stringify(value),
+    headers: { 'content-type': 'application/json', 'cache-control': 'no-store', ...headers },
+  });
+}
+
+function withOpenCors(response) {
+  const copy = new Response(response.body, response);
+  for (const [key, value] of Object.entries(OPEN_CORS)) copy.headers.set(key, value);
+  return copy;
+}
+
+function originProblem(request, origin) {
+  const sent = request.headers.get('origin');
+  if (sent === null || sent === origin) return null;
+  return json(403, { jsonrpc: '2.0', error: { code: -32600, message: 'Origin not allowed' } });
+}
+
+function tooLarge(request) {
+  return Number(request.headers.get('content-length') || 0) > MAX_BODY;
+}
+
+async function serveFile(request, env, id, name) {
+  const file = await getFile(env.DB, id);
+  if (!file || file.filename !== name) return json(404, { error: 'not_found' });
+  const active = /html|svg|xml|javascript/i.test(file.media_type);
+  const headers = {
+    'content-type': file.media_type,
+    'content-length': String(file.bytes),
+    'content-disposition': `${active ? 'attachment' : 'inline'}; filename="${file.filename}"`,
+    'content-security-policy': "sandbox; default-src 'none'",
+    'x-content-type-options': 'nosniff',
+    'cache-control': 'public, max-age=300',
+    'access-control-allow-origin': '*',
   };
-}
-
-function originFrom(req) {
-  const configured = configuredOrigin();
-  if (configured) return configured;
-  const proto = String(req.headers['x-forwarded-proto'] || 'http').split(',')[0].trim();
-  const host = String(req.headers['x-forwarded-host'] || req.headers.host || '127.0.0.1').split(',')[0].trim();
-  return `${proto}://${host}`;
-}
-
-function readBody(req) {
-  return new Promise((resolve, reject) => {
-    const chunks = [];
-    let size = 0;
-    req.on('data', chunk => {
-      size += chunk.length;
-      if (size > MAX_BODY) {
-        reject(Object.assign(new Error('body too large'), { status: 413 }));
-        req.destroy();
+  if (request.method === 'HEAD') return new Response(null, { headers });
+  let n = 0;
+  const body = new ReadableStream({
+    async pull(controller) {
+      if (n >= file.chunks) {
+        controller.close();
         return;
       }
-      chunks.push(chunk);
-    });
-    req.on('end', () => resolve(Buffer.concat(chunks)));
-    req.on('error', reject);
+      controller.enqueue(new Uint8Array(await fileChunk(env.DB, file.id, n)));
+      n += 1;
+    },
   });
+  return new Response(body, { headers });
 }
 
-async function readParams(req, body) {
-  const type = String(req.headers['content-type'] || '');
-  const text = body.toString('utf8');
-  if (type.includes('application/json')) {
-    const doc = JSON.parse(text || '{}');
-    const params = new URLSearchParams();
-    for (const [key, value] of Object.entries(doc)) {
-      if (Array.isArray(value)) value.forEach(item => params.append(key, String(item)));
-      else if (value != null) params.set(key, String(value));
-    }
-    return params;
-  }
-  return new URLSearchParams(text);
-}
-
-function nodeRequest(origin, req, body) {
-  const headers = new Headers();
-  for (const [key, value] of Object.entries(req.headers)) {
-    if (value == null) continue;
-    if (Array.isArray(value)) value.forEach(item => headers.append(key, item));
-    else headers.set(key, value);
-  }
-  const method = req.method || 'GET';
-  const init = { method, headers };
-  if (method !== 'GET' && method !== 'HEAD') init.body = body;
-  return new Request(`${origin}${req.url}`, init);
-}
-
-async function writeWeb(res, webRes) {
-  const headers = {};
-  webRes.headers.forEach((value, key) => {
-    headers[key] = value;
-  });
-  applyCors(headers);
-  const bytes = Buffer.from(await webRes.arrayBuffer());
-  res.writeHead(webRes.status, headers);
-  res.end(bytes);
-}
-
-async function handle(req, res) {
-  const origin = originFrom(req);
-  const url = new URL(req.url || '/', origin);
-  const pathName = url.pathname;
-
-  if (req.method === 'OPTIONS') {
-    send(res, { status: 204, headers: {}, body: '' });
-    return;
-  }
-
-  if ((req.method === 'GET' || req.method === 'HEAD') && (pathName === '/' || pathName === '/plan')) {
-    if (pathName === '/') {
-      send(res, { status: 302, headers: { location: '/plan' }, body: '' });
-      return;
-    }
-    const page = planPage(origin);
-    send(res, {
-      status: 200,
-      headers: { 'content-type': 'text/html; charset=utf-8' },
-      body: req.method === 'HEAD' ? '' : page,
-    });
-    return;
-  }
-
-  if (req.method === 'GET' && (pathName === '/.well-known/oauth-protected-resource' || pathName === '/.well-known/oauth-protected-resource/mcp')) {
-    send(res, json(200, protectedResourceDocument(origin)));
-    return;
-  }
-
-  if (req.method === 'GET' && (pathName === '/.well-known/oauth-authorization-server' || pathName === '/.well-known/openid-configuration')) {
-    send(res, json(200, metadataDocument(origin)));
-    return;
-  }
-
-  if (req.method === 'GET' && pathName === '/authorize') {
-    send(res, await handleAuthorize(origin, url.searchParams));
-    return;
-  }
-
-  if (req.method === 'POST' && pathName === '/authorize/decision') {
-    const params = await readParams(req, await readBody(req));
-    send(res, await handleDecision(origin, params));
-    return;
-  }
-
-  if (req.method === 'POST' && pathName === '/token') {
-    const params = await readParams(req, await readBody(req));
-    send(res, await handleToken(origin, req.headers.authorization, params));
-    return;
-  }
-
-  if (req.method === 'POST' && pathName === '/register') {
-    send(res, await handleRegister((await readBody(req)).toString('utf8')));
-    return;
-  }
-
-  const fileMatch = /^\/files\/([^/]+)\/([^/]+)$/.exec(pathName);
-  if ((req.method === 'GET' || req.method === 'HEAD') && fileMatch) {
-    const row = getFile(decodeURIComponent(fileMatch[1]));
-    const name = decodeURIComponent(fileMatch[2]);
-    const full = row && row.filename === name ? filePath(row) : null;
-    if (!full) {
-      send(res, json(404, { error: 'not_found' }));
-      return;
-    }
-    const bytes = await readFile(full);
-    send(res, {
-      status: 200,
+async function serveMcp(request, env, origin) {
+  const bad = originProblem(request, origin);
+  if (bad) return bad;
+  if (request.method === 'OPTIONS') {
+    return new Response(null, {
+      status: 204,
       headers: {
-        'content-type': row.mediaType,
-        'content-length': String(bytes.length),
-        'content-disposition': `inline; filename="${row.filename.replace(/"/g, '')}"`,
-        'content-security-policy': 'sandbox',
-        'x-content-type-options': 'nosniff',
-        'cache-control': 'public, max-age=300',
+        allow: 'POST, OPTIONS',
+        'access-control-allow-origin': origin,
+        'access-control-allow-methods': 'POST, OPTIONS',
+        'access-control-allow-headers': 'Authorization, Content-Type, Accept, MCP-Protocol-Version, Mcp-Method, Mcp-Name',
+        'access-control-expose-headers': 'WWW-Authenticate',
       },
-      body: req.method === 'HEAD' ? '' : bytes,
     });
-    return;
+  }
+  const token = readBearer(request.headers.get('authorization'));
+  const access = await authenticate(env, token, origin);
+  if (!access) {
+    const error = token ? 'invalid_token' : undefined;
+    return json(401, { error: error || 'unauthorized' }, { 'www-authenticate': wwwAuthenticate(origin, error) });
+  }
+  if (request.method !== 'POST') return new Response(null, { status: 405, headers: { allow: 'POST, OPTIONS' } });
+  if (tooLarge(request)) return json(413, { jsonrpc: '2.0', error: { code: -32600, message: 'Request body is too large' } });
+  return handleMcp(request, env, origin, access);
+}
+
+async function route(request, env) {
+  const url = new URL(request.url);
+  const { origin, pathname } = url;
+  const { method } = request;
+  const ip = request.headers.get('cf-connecting-ip') || 'unknown';
+  const read = method === 'GET' || method === 'HEAD';
+
+  if (pathname === '/mcp') return serveMcp(request, env, origin);
+
+  if (read && pathname === '/') return Response.redirect(`${origin}/plan`, 302);
+  if (read && pathname === '/plan') {
+    return new Response(method === 'HEAD' ? null : planPage(origin), { headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-cache' } });
   }
 
-  if (pathName === '/mcp' || pathName === '/mcp/') {
-    const token = readBearer(req.headers.authorization);
-    const access = authenticateAccessToken(token, origin);
-    if (!access) {
-      const error = token ? 'invalid_token' : undefined;
-      send(res, {
-        status: 401,
-        headers: {
-          'content-type': 'application/json; charset=utf-8',
-          'www-authenticate': wwwAuthenticate(origin, {
-            error,
-            description: token ? 'invalid token' : undefined,
-          }),
-          'cache-control': 'no-store',
-        },
-        body: JSON.stringify({
-          error: error || 'unauthorized',
-          error_description: token ? 'invalid token' : 'authentication required',
-        }),
-      });
-      return;
+  if (method === 'OPTIONS' && OPEN_PATHS.includes(pathname)) return new Response(null, { status: 204, headers: OPEN_CORS });
+  if (read && (pathname === '/.well-known/oauth-protected-resource' || pathname === '/.well-known/oauth-protected-resource/mcp')) {
+    return withOpenCors(json(200, protectedResourceDocument(origin)));
+  }
+  if (read && pathname === '/.well-known/oauth-authorization-server') {
+    return withOpenCors(json(200, authorizationServerDocument(origin)));
+  }
+
+  if (method === 'GET' && pathname === '/authorize') return handleAuthorize(env, origin, url.searchParams);
+  if (method === 'POST' && pathname === '/authorize/decision') {
+    const sent = request.headers.get('origin');
+    if (sent && sent !== origin) return json(403, { error: 'origin_not_allowed' });
+    return handleDecision(env, origin, new URLSearchParams(await request.text()), ip);
+  }
+  if (method === 'POST' && pathname === '/token') {
+    return withOpenCors(await handleToken(env, origin, request.headers.get('authorization'), new URLSearchParams(await request.text())));
+  }
+  if (method === 'POST' && pathname === '/register') {
+    return withOpenCors(await handleRegister(env, await request.text(), ip));
+  }
+
+  const fileMatch = /^\/files\/([^/]+)\/([^/]+)$/.exec(pathname);
+  if (read && fileMatch) return serveFile(request, env, fileMatch[1], fileMatch[2]);
+
+  return json(404, { error: 'not_found' });
+}
+
+export default {
+  async fetch(request, env) {
+    try {
+      return await route(request, env);
+    } catch (error) {
+      console.error('unhandled', String(error));
+      return json(500, { error: 'server_error' });
     }
-    const body = await readBody(req);
-    const request = nodeRequest(origin, req, body);
-    await runWithOrigin(origin, async () => {
-      await writeWeb(res, await callMcp(request));
-    });
-    return;
-  }
-
-  send(res, json(404, { error: 'not_found' }));
-}
-
-export async function startServer(port = 8787, host = '0.0.0.0') {
-  await loadStore();
-  const server = createServer((req, res) => {
-    handle(req, res).catch(error => {
-      const status = error.status || 500;
-      if (!res.headersSent) {
-        send(res, json(status, { error: status === 413 ? 'payload_too_large' : 'server_error' }));
-      } else {
-        res.end();
-      }
-      if (status === 500) console.error(error);
-    });
-  });
-  await new Promise((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(port, host, resolve);
-  });
-  return server;
-}
-
-const isMain = process.argv[1]
-  && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
-
-if (isMain) {
-  const port = Number(process.env.PORT || 8787);
-  startServer(port).then(server => {
-    const address = server.address();
-    console.log(`schema-first listening on ${address.port}`);
-  }).catch(error => {
-    console.error(error);
-    process.exit(1);
-  });
-}
+  },
+  async scheduled(_event, env) {
+    await prune(env.DB);
+  },
+};
