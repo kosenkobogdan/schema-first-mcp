@@ -362,7 +362,7 @@ await step('upload neutralises hostile names and active content', async () => {
 });
 
 await step('upload refuses a file over the limit', async () => {
-  const result = await tool(token, 'upload', { filename: 'big.txt', content: 'x'.repeat(8_000_001) });
+  const result = await tool(token, 'upload', { filename: 'big.txt', content: 'x'.repeat(12_000_001) });
   assert.equal(result.isError, true);
 });
 

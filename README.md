@@ -20,6 +20,12 @@ Needs Node 22 and a Cloudflare account.
     npx wrangler secret put OWNER_PASSPHRASE
     npx wrangler deploy
 
+## Upload a large file
+
+A file too large to pass through a tool call from a harness goes through the same `upload` tool with this client. It signs in as a new client with the owner passphrase and prints the link.
+
+    BASE=https://your-host PASSPHRASE=... node scripts/upload.js path/to/file [media/type]
+
 ## Test
 
 `test/check.js` calls a running server as a stranger would. It leaves test notes and files behind, so point it at a server you can clean.
