@@ -159,7 +159,8 @@ function html(status, body, redirectOrigin) {
       'cache-control': 'no-store',
       'content-security-policy': `default-src 'none'; style-src 'unsafe-inline'; form-action ${formAction}; frame-ancestors 'none'; base-uri 'none'`,
       'x-frame-options': 'DENY',
-      'referrer-policy': 'no-referrer',
+      // no-referrer would make browsers post the form with Origin: null.
+      'referrer-policy': 'same-origin',
     },
   });
 }

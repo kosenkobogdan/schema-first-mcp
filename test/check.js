@@ -174,6 +174,8 @@ await step('the consent page escapes the client name', async () => {
   const page = await (await fetch(startAuthorize(clientId).url)).text();
   assert.ok(page.includes('check &lt;b&gt;'));
   assert.ok(!page.includes('check <b>'));
+  const headers = (await fetch(startAuthorize(clientId).url)).headers;
+  assert.equal(headers.get('referrer-policy'), 'same-origin');
 });
 
 await step('a stranger cannot approve itself without the passphrase', async () => {
